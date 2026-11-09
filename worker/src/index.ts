@@ -1749,6 +1749,11 @@ app.post('/add-channel', async (c) => {
   const cat = await db.prepare('SELECT id, slug, name FROM categories WHERE slug = ?').bind(catSlug).first<{ id: number; slug: string; name: string }>()
   if (!cat) return render('Pick a category from the list.')
   let uc = parseChannelUc(input)
+  if (!uc) {
+    // A full @handle URL (the form YouTube's Share button copies, usually with ?si=...).
+    const hm = input.match(/\/@([\w.-]+)/)
+    if (hm) uc = await resolveHandle(hm[1])
+  }
   if (!uc && input.startsWith('@')) uc = await resolveHandle(input)
   if (!uc && /^[\w.-]+$/.test(input.replace(/^@/, ''))) uc = await resolveHandle(input)
   if (!uc) return render('Could not work out a channel from that. Paste a /channel/UC... URL, an @handle, or a raw UC id.')
