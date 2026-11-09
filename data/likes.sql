@@ -1,0 +1,2 @@
+CREATE TABLE IF NOT EXISTS likes (video_id TEXT PRIMARY KEY REFERENCES videos(id), likes INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_likes_count ON likes(likes DESC);
