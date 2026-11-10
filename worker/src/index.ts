@@ -269,27 +269,30 @@ main { flex: 1; min-width: 0; padding: 0 24px 40px; }
 @media (max-width: 1100px) { .watch { flex-direction: column; } .watch .secondary { width: 100%; } }
 .player { aspect-ratio: 16/9; background: #000; border-radius: var(--radius); overflow: hidden; }
 .player iframe, .player > div { width: 100%; height: 100%; display: block; border: 0; }
-.watch h1 { font-size: 20px; line-height: 28px; margin: 12px 0 0; font-weight: 700; }
-.chrow { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
-.chrow .av { width: 40px; height: 40px; font-size: 16px; }
-.chrow .nm { font-weight: 600; font-size: 16px; }
-.chrow .nm:hover { text-decoration: underline; }
-.chrow .cnt { color: var(--fg2); font-size: 12px; }
-.chrow .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.watch h1 { font-size: 20px; line-height: 28px; margin: 12px 0 0; font-weight: 700; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.wmeta { margin-top: 8px; color: var(--fg2); font-size: 14px; line-height: 20px; }
+.wmeta .wm-ch { color: var(--fg); font-weight: 600; }
+.wmeta .wm-ch:hover { text-decoration: underline; }
+.wmeta .wtag { color: var(--fg2); }
+.wmeta .wtag:hover { text-decoration: underline; }
+.wmeta .wmore { background: none; border: 0; padding: 0; color: var(--fg); font-weight: 600; cursor: pointer; white-space: nowrap; }
+.wdesc { background: var(--bg3); border-radius: var(--radius); padding: 12px; margin-top: 12px; }
+.wdesc[hidden] { display: none; }
+.wdesc .why { white-space: pre-wrap; }
+.wdesc .why b { display: block; margin-bottom: 2px; }
+.wdesc .ytlink { color: #3ea6ff; }
+.wrow { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.wrow .av { width: 40px; height: 40px; font-size: 16px; flex: none; }
+.wrow .pill { flex: none; }
+.wrow .wacts { margin-left: auto; display: flex; gap: 6px; align-items: center; flex: none; }
+.icobtn { width: 36px; height: 36px; border-radius: 50%; border: 0; background: var(--bg3); color: var(--fg); font-size: 18px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; text-decoration: none; flex: none; }
+.icobtn:hover { background: var(--bg4); }
 .pill { height: 36px; padding: 0 16px; border-radius: 18px; border: 0; background: var(--bg3); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex-shrink: 0; }
 .pill:hover { background: var(--bg4); }
 .pill.primary { background: var(--fg); color: var(--bg); }
 .pill input { accent-color: var(--accent); margin: 0; }
-.desc { background: var(--bg3); border-radius: var(--radius); padding: 12px; margin-top: 12px; }
-.desc .stats { font-weight: 600; }
-.desc .why { margin-top: 8px; white-space: pre-wrap; }
-.desc .why b { display: block; margin-bottom: 2px; }
-.desc.clamp .why { display: none; }
-.desc .ytlink { font-weight: 400; color: #3ea6ff; }
-@media (max-width: 700px) { .chrow .actions { width: 100%; margin-left: 0; } .chrow .actions .pill { padding: 0 12px; } }
-.desc .more { background: none; border: 0; padding: 0; margin-top: 6px; font-weight: 600; white-space: nowrap; }
-.watchtags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
-.watchtags .tag { font-size: 13px; padding: 5px 12px; }
+.upnext-h .autoplay { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg2); font-weight: 500; cursor: pointer; }
+.upnext-h .autoplay input { accent-color: var(--accent); margin: 0; }
 .upnext-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .upnext-h h3 { margin: 0; font-size: 16px; }
 .mini { display: flex; gap: 8px; margin-bottom: 8px; border-radius: 8px; }
@@ -1268,26 +1271,22 @@ function watchHead(v: ApiVideo, desc: string): string {
 // #ssrWatch carries the video id + up-next list as JSON for the client.
 function watchHTML(v: ApiVideo, upNext: ApiVideo[], channelCount: number): string {
   const c = v.channel
-  const tags =
-    v.tags.length > 0
-      ? `<div class="watchtags">${v.tags.map((t) => `<a class="tag" href="/tag/${encodeURIComponent(t)}">${esc(t)}</a>`).join('')}</div>`
-      : ''
+  const metaParts = [
+    `<a class="wm-ch" href="${channelURL(c)}">${esc(c.name)}</a> ${tierBadge(c.tier)}`,
+    v.views != null ? fmtViews(v.views) : '',
+    v.dur ? fmtDur(v.dur) : '',
+    v.published_at ? fmtDateAbs(v.published_at) : '',
+  ].filter(Boolean)
+  const tagLinks = v.tags.slice(0, 2).map((t) => `<a class="wtag" href="/tag/${encodeURIComponent(t)}">#${esc(t)}</a>`).join(' ')
   const ssrData = JSON.stringify({ id: v.id, upNext }).replace(/</g, '\\u003c')
   return `<div class="watch"><div class="primary">`
     + `<div class="player"><div id="ytplayer"></div></div>`
     + `<h1>${esc(v.title)}</h1>`
-    + `<div class="chrow">${av(c)}<div><a class="nm" href="${channelURL(c)}">${esc(c.name)}</a> ${tierBadge(c.tier)}`
-    + `<div class="cnt">${channelCount.toLocaleString()} videos</div></div>`
-    + `<div class="actions"><button class="pill primary" id="nextBtn" title="Shift+N">Next random ⏭</button>`
-    + likeBtnHTML(v, true)
-    + `<button class="pill" data-addpl="${v.id}" title="Add to a playlist">＋ Playlist</button>`
-    + `<label class="pill" title="Play a random video when this one ends"><input type="checkbox" id="autoNext" checked> Autoplay</label>`
-    + `</div></div>`
-    + `<div class="desc clamp" id="desc"><div class="stats">${[v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ')}${c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : ''} · <a class="ytlink" href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">Open on YouTube ↗</a></div>`
-    + `<div class="why"><b>${tierBadge(c.tier)} ${esc(c.tier)} tier${c.tag ? ' · ' + esc(c.tag) : ''}</b>${c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>'}</div>`
-    + '<button class="more" id="moreBtn">Show more</button>' + `</div>`
-    + tags
-    + `</div><div class="secondary"><div class="upnext-h"><h3>Up next</h3></div><div id="upnext">${upNext.map(miniHTML).join('')}</div></div></div>`
+    + `<div class="wmeta">${metaParts.join(' · ')}${tagLinks ? ' · ' + tagLinks : ''}${c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : ''} <button class="wmore" id="wmoreBtn">…more</button></div>`
+    + `<div class="wdesc" id="wdesc" hidden><div class="why"><b>${tierBadge(c.tier)} ${esc(c.tier)} tier${c.tag ? ' · ' + esc(c.tag) : ''} · ${channelCount.toLocaleString()} videos</b>${c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>'}</div><div style="margin-top:8px"><a class="ytlink" href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">Open on YouTube ↗</a></div></div>`
+    + `<div class="wrow">${av(c)}<button class="pill primary" id="nextBtn" title="Shift+N">Next random ⏭</button>`
+    + `<div class="wacts">${likeBtnHTML(v, true)}<button class="icobtn" data-addpl="${v.id}" title="Add to a playlist">＋</button><a class="icobtn" href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener" title="Open on YouTube">↗</a></div></div>`
+    + `</div><div class="secondary"><div class="upnext-h"><h3>Up next</h3><label class="autoplay" title="Play a random video when this one ends">Autoplay <input type="checkbox" id="autoNext" checked></label></div><div id="upnext">${upNext.map(miniHTML).join('')}</div></div></div>`
     + `<script id="ssrWatch" type="application/json">${ssrData}</script>`
 }
 
@@ -2595,8 +2594,8 @@ function loadYT() {
 }
 function wireWatchPage() {
   // Wire the buttons on a watch page, client-rendered or server-rendered.
-  var mb = document.getElementById('moreBtn');
-  if (mb) mb.onclick = function() { var d = document.getElementById('desc'); d.classList.toggle('clamp'); mb.textContent = d.classList.contains('clamp') ? 'Show more' : 'Show less'; };
+  var mb = document.getElementById('wmoreBtn');
+  if (mb) mb.onclick = function() { var d = document.getElementById('wdesc'); var open = d.hasAttribute('hidden'); if (open) d.removeAttribute('hidden'); else d.setAttribute('hidden', ''); mb.textContent = open ? 'Show less' : '…more'; };
   var nb = document.getElementById('nextBtn');
   if (nb) nb.onclick = playNext;
   var an = document.getElementById('autoNext');
@@ -2624,21 +2623,21 @@ function viewWatch(id) {
     var c = v.channel;
     // A legacy #/watch/<id> link converts to the canonical path, no reload.
     if (location.hash.match(/^#\/watch\//)) history.replaceState(null, '', watchURL(v));
+    var metaParts = [
+      '<a class="wm-ch" href="' + channelURL(c) + '">' + esc(c.name) + '</a> ' + tierBadge(c.tier),
+      v.views != null ? fmtViews(v.views) : '',
+      v.dur ? fmtDur(v.dur) : '',
+      v.published_at ? fmtDateAbs(v.published_at) : ''
+    ].filter(Boolean);
+    var tagLinks = (v.tags || []).slice(0, 2).map(function(t) { return '<a class="wtag" href="/tag/' + encodeURIComponent(t) + '">#' + esc(t) + '</a>'; }).join(' ');
     main.innerHTML = '<div class="watch"><div class="primary">'
       + '<div class="player"><div id="ytplayer"></div></div>'
       + '<h1>' + esc(v.title) + '</h1>'
-      + '<div class="chrow">' + av(c) + '<div><a class="nm" href="' + channelURL(c) + '">' + esc(c.name) + '</a> ' + tierBadge(c.tier)
-      + '<div class="cnt">' + (c.video_count || c.n || 0).toLocaleString() + ' videos</div></div>'
-      + '<div class="actions"><button class="pill primary" id="nextBtn" title="Shift+N">Next random ⏭</button>'
-      + likeBtnHTML(v.id, v.likes, true)
-      + '<button class="pill" data-addpl="' + v.id + '" title="Add to a playlist">＋ Playlist</button>'
-      + '<label class="pill" title="Play a random video when this one ends"><input type="checkbox" id="autoNext"' + (autoplayNext ? ' checked' : '') + '> Autoplay</label>'
-      + '</div></div>'
-      + '<div class="desc clamp" id="desc"><div class="stats">' + [v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ') + (c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : '') + ' · <a class="ytlink" href="https://www.youtube.com/watch?v=' + v.id + '" target="_blank" rel="noopener">Open on YouTube ↗</a></div>'
-      + '<div class="why"><b>' + tierBadge(c.tier) + ' ' + esc(c.tier) + ' tier' + (c.tag ? ' · ' + esc(c.tag) : '') + '</b>' + (c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>') + '</div>'
-      + '<button class="more" id="moreBtn">Show more</button></div>'
-      + (v.tags && v.tags.length ? '<div class="watchtags">' + v.tags.map(function(t) { return '<a class="tag" href="/tag/' + encodeURIComponent(t) + '">' + esc(t) + '</a>'; }).join('') + '</div>' : '')
-      + '</div><div class="secondary"><div class="upnext-h"><h3>Up next</h3></div><div id="upnext"></div></div></div>';
+      + '<div class="wmeta">' + metaParts.join(' · ') + (tagLinks ? ' · ' + tagLinks : '') + (c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : '') + ' <button class="wmore" id="wmoreBtn">…more</button></div>'
+      + '<div class="wdesc" id="wdesc" hidden><div class="why"><b>' + tierBadge(c.tier) + ' ' + esc(c.tier) + ' tier' + (c.tag ? ' · ' + esc(c.tag) : '') + ' · ' + (c.video_count || c.n || 0).toLocaleString() + ' videos</b>' + (c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>') + '</div><div style="margin-top:8px"><a class="ytlink" href="https://www.youtube.com/watch?v=' + v.id + '" target="_blank" rel="noopener">Open on YouTube ↗</a></div></div>'
+      + '<div class="wrow">' + av(c) + '<button class="pill primary" id="nextBtn" title="Shift+N">Next random ⏭</button>'
+      + '<div class="wacts">' + likeBtnHTML(v.id, v.likes, true) + '<button class="icobtn" data-addpl="' + v.id + '" title="Add to a playlist">＋</button><a class="icobtn" href="https://www.youtube.com/watch?v=' + v.id + '" target="_blank" rel="noopener" title="Open on YouTube">↗</a></div></div>'
+      + '</div><div class="secondary"><div class="upnext-h"><h3>Up next</h3><label class="autoplay" title="Play a random video when this one ends">Autoplay <input type="checkbox" id="autoNext"' + (autoplayNext ? ' checked' : '') + '></label></div><div id="upnext"></div></div></div>';
     wireWatchPage();
     document.title = v.title + ' - TubePlus';
     window.scrollTo(0, 0);
