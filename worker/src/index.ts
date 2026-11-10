@@ -1215,23 +1215,32 @@ function watchDescription(v: ApiVideo): string {
 function watchHead(v: ApiVideo, desc: string): string {
   const canonical = SITE_URL + watchURL(v)
   const img = `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`
-  const ld: Record<string, unknown> = {
-    '@context': 'https://schema.org',
-    '@type': 'VideoObject',
-    name: v.title,
-    description: desc,
-    thumbnailUrl: img,
-    contentUrl: `https://www.youtube.com/watch?v=${v.id}`,
-    embedUrl: `https://www.youtube.com/embed/${v.id}`,
-  }
-  if (v.views != null) {
-    ld.interactionStatistic = {
-      '@type': 'InteractionCounter',
-      interactionType: { '@type': 'WatchAction' },
-      userInteractionCount: v.views,
+  // VideoObject requires uploadDate for video rich results (Search Console
+  // flags a missing uploadDate as critical). Only emit the JSON-LD when we
+  // know the publish date — newer videos ingested via RSS have published_at;
+  // the older seed videos have published_at NULL, so they get no VideoObject
+  // rather than an invalid one.
+  let ldScript = ''
+  if (v.published_at) {
+    const ld: Record<string, unknown> = {
+      '@context': 'https://schema.org',
+      '@type': 'VideoObject',
+      name: v.title,
+      description: desc,
+      thumbnailUrl: img,
+      contentUrl: `https://www.youtube.com/watch?v=${v.id}`,
+      embedUrl: `https://www.youtube.com/embed/${v.id}`,
+      uploadDate: v.published_at,
     }
+    if (v.views != null) {
+      ld.interactionStatistic = {
+        '@type': 'InteractionCounter',
+        interactionType: { '@type': 'WatchAction' },
+        userInteractionCount: v.views,
+      }
+    }
+    ldScript = `\n<script type="application/ld+json">${JSON.stringify(ld).replace(/</g, '\\u003c')}</script>`
   }
-  const ldJson = JSON.stringify(ld).replace(/</g, '\\u003c')
   return `<meta name="description" content="${esc(desc)}">
 <meta property="og:title" content="${esc(v.title)}">
 <meta property="og:description" content="${esc(desc)}">
@@ -1242,8 +1251,7 @@ function watchHead(v: ApiVideo, desc: string): string {
 <meta name="twitter:title" content="${esc(v.title)}">
 <meta name="twitter:description" content="${esc(desc)}">
 <meta name="twitter:image" content="${esc(img)}">
-<link rel="canonical" href="${esc(canonical)}">
-<script type="application/ld+json">${ldJson}</script>`
+<link rel="canonical" href="${esc(canonical)}">${ldScript}`
 }
 
 // Server-side watch page — mirrors the markup the client builds in viewWatch
