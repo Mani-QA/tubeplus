@@ -276,7 +276,7 @@ main { flex: 1; min-width: 0; padding: 0 24px 40px; }
 .chrow .nm:hover { text-decoration: underline; }
 .chrow .cnt { color: var(--fg2); font-size: 12px; }
 .chrow .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
-.pill { height: 36px; padding: 0 16px; border-radius: 18px; border: 0; background: var(--bg3); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+.pill { height: 36px; padding: 0 16px; border-radius: 18px; border: 0; background: var(--bg3); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex-shrink: 0; }
 .pill:hover { background: var(--bg4); }
 .pill.primary { background: var(--fg); color: var(--bg); }
 .pill input { accent-color: var(--accent); margin: 0; }
@@ -284,12 +284,12 @@ main { flex: 1; min-width: 0; padding: 0 24px 40px; }
 .desc .stats { font-weight: 600; }
 .desc .why { margin-top: 8px; white-space: pre-wrap; }
 .desc .why b { display: block; margin-bottom: 2px; }
-.desc.clamp .why { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.desc .more { background: none; border: 0; padding: 0; margin-top: 6px; font-weight: 600; }
+.desc.clamp .why { display: none; }
+.desc .ytlink { font-weight: 400; color: #3ea6ff; }
+@media (max-width: 700px) { .chrow .actions { width: 100%; margin-left: 0; } .chrow .actions .pill { padding: 0 12px; } }
+.desc .more { background: none; border: 0; padding: 0; margin-top: 6px; font-weight: 600; white-space: nowrap; }
 .watchtags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
 .watchtags .tag { font-size: 13px; padding: 5px 12px; }
-.watchcat { margin-top: 10px; color: var(--fg2); font-size: 13px; }
-.watchcat a { color: #3ea6ff; text-decoration: underline; }
 .upnext-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .upnext-h h3 { margin: 0; font-size: 16px; }
 .mini { display: flex; gap: 8px; margin-bottom: 8px; border-radius: 8px; }
@@ -1282,12 +1282,11 @@ function watchHTML(v: ApiVideo, upNext: ApiVideo[], channelCount: number): strin
     + likeBtnHTML(v, true)
     + `<button class="pill" data-addpl="${v.id}" title="Add to a playlist">＋ Playlist</button>`
     + `<label class="pill" title="Play a random video when this one ends"><input type="checkbox" id="autoNext" checked> Autoplay</label>`
-    + `<a class="pill" href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">Open on YouTube ↗</a></div></div>`
-    + `<div class="desc clamp" id="desc"><div class="stats">${[v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ')}${c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : ''}</div>`
+    + `</div></div>`
+    + `<div class="desc clamp" id="desc"><div class="stats">${[v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ')}${c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : ''} · <a class="ytlink" href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">Open on YouTube ↗</a></div>`
     + `<div class="why"><b>${tierBadge(c.tier)} ${esc(c.tier)} tier${c.tag ? ' · ' + esc(c.tag) : ''}</b>${c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>'}</div>`
-    + (c.blurb && c.blurb.length > 220 ? '<button class="more" id="moreBtn">Show more</button>' : '') + `</div>`
+    + '<button class="more" id="moreBtn">Show more</button>' + `</div>`
     + tags
-    + (v.category ? `<div class="watchcat">Category: <a href="/category/${esc(v.category.slug)}">${esc(v.category.name)}</a></div>` : '')
     + `</div><div class="secondary"><div class="upnext-h"><h3>Up next</h3></div><div id="upnext">${upNext.map(miniHTML).join('')}</div></div></div>`
     + `<script id="ssrWatch" type="application/json">${ssrData}</script>`
 }
@@ -2634,12 +2633,11 @@ function viewWatch(id) {
       + likeBtnHTML(v.id, v.likes, true)
       + '<button class="pill" data-addpl="' + v.id + '" title="Add to a playlist">＋ Playlist</button>'
       + '<label class="pill" title="Play a random video when this one ends"><input type="checkbox" id="autoNext"' + (autoplayNext ? ' checked' : '') + '> Autoplay</label>'
-      + '<a class="pill" href="https://www.youtube.com/watch?v=' + v.id + '" target="_blank" rel="noopener">Open on YouTube ↗</a></div></div>'
-      + '<div class="desc clamp" id="desc"><div class="stats">' + [v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ') + (c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : '') + '</div>'
+      + '</div></div>'
+      + '<div class="desc clamp" id="desc"><div class="stats">' + [v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ') + (c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : '') + ' · <a class="ytlink" href="https://www.youtube.com/watch?v=' + v.id + '" target="_blank" rel="noopener">Open on YouTube ↗</a></div>'
       + '<div class="why"><b>' + tierBadge(c.tier) + ' ' + esc(c.tier) + ' tier' + (c.tag ? ' · ' + esc(c.tag) : '') + '</b>' + (c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>') + '</div>'
-      + (c.blurb && c.blurb.length > 220 ? '<button class="more" id="moreBtn">Show more</button>' : '') + '</div>'
+      + '<button class="more" id="moreBtn">Show more</button></div>'
       + (v.tags && v.tags.length ? '<div class="watchtags">' + v.tags.map(function(t) { return '<a class="tag" href="/tag/' + encodeURIComponent(t) + '">' + esc(t) + '</a>'; }).join('') + '</div>' : '')
-      + (v.category ? '<div class="watchcat">Category: <a href="/category/' + esc(v.category.slug) + '">' + esc(v.category.name) + '</a></div>' : '')
       + '</div><div class="secondary"><div class="upnext-h"><h3>Up next</h3></div><div id="upnext"></div></div></div>';
     wireWatchPage();
     document.title = v.title + ' - TubePlus';
