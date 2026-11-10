@@ -534,6 +534,15 @@ function fmtViews(n: number | null | undefined): string {
   return n + ' views'
 }
 
+// Publish date shown as dd-mmm-yyyy ("28-Oct-2026").
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+function fmtDateAbs(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  return `${String(d.getUTCDate()).padStart(2, '0')}-${MONTHS[d.getUTCMonth()]}-${d.getUTCFullYear()}`
+}
+
 // ---------------------------------------------------------------------------
 // D1 row shapes + API shapes
 // ---------------------------------------------------------------------------
@@ -1176,7 +1185,7 @@ function miniHTML(v: ApiVideo): string {
     + `<div class="thumb"><img loading="lazy" src="${thumb(v.id)}" alt="">${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}</div>`
     + `<div style="min-width:0"><div class="t" title="${esc(v.title)}">${esc(v.title)}</div>`
     + `<div class="sub">${esc(c.name)} ${tierBadge(c.tier)}</div>`
-    + `<div class="sub">${fmtViews(v.views)}</div></div></a>`
+    + `<div class="sub">${[v.views != null ? fmtViews(v.views) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ')}</div></div></a>`
 }
 
 function cardHTML(v: ApiVideo, showChannel = true): string {
@@ -1197,7 +1206,7 @@ function cardHTML(v: ApiVideo, showChannel = true): string {
       <div class="sub">${showChannel ? `<a class="chlink" href="${channelURL(c)}">${esc(c.name)}</a> ${tierBadge(c.tier)}` : ''}
         ${v.views != null ? `<span>${showChannel ? '· ' : ''}${fmtViews(v.views)}</span>` : ''}${
           v.category ? `<span>· <a class="catlink" href="/category/${esc(v.category.slug)}">${esc(v.category.name)}</a></span>` : ''
-        }</div>
+        }${v.published_at ? `<span>· ${fmtDateAbs(v.published_at)}</span>` : ''}</div>
       ${tags}
       <div class="likerow">${likeBtnHTML(v)}<button class="addpl-btn" data-addpl="${v.id}" title="Add to a playlist">＋ Playlist</button></div>
     </div></div></a>`
@@ -1274,7 +1283,7 @@ function watchHTML(v: ApiVideo, upNext: ApiVideo[], channelCount: number): strin
     + `<button class="pill" data-addpl="${v.id}" title="Add to a playlist">＋ Playlist</button>`
     + `<label class="pill" title="Play a random video when this one ends"><input type="checkbox" id="autoNext" checked> Autoplay</label>`
     + `<a class="pill" href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">Open on YouTube ↗</a></div></div>`
-    + `<div class="desc clamp" id="desc"><div class="stats">${[v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : ''].filter(Boolean).join(' · ')}${c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : ''}</div>`
+    + `<div class="desc clamp" id="desc"><div class="stats">${[v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ')}${c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : ''}</div>`
     + `<div class="why"><b>${tierBadge(c.tier)} ${esc(c.tier)} tier${c.tag ? ' · ' + esc(c.tag) : ''}</b>${c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>'}</div>`
     + (c.blurb && c.blurb.length > 220 ? '<button class="more" id="moreBtn">Show more</button>' : '') + `</div>`
     + tags
@@ -2132,6 +2141,8 @@ var av = function(c) { return '<span class="av t' + c.tier + '">' + esc(initials
 var tierBadge = function(t) { return '<span class="tier t' + t + '" title="' + t + ' tier: ' + esc(TIER_NAMES[t]) + '">' + t + '</span>'; };
 function fmtDur(s) { if (!s) return ''; var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = Math.floor(s % 60); return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0'); }
 function fmtViews(n) { if (n == null) return ''; if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1).replace(/\.0$/, '') + 'B views'; if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M views'; if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K views'; return n + ' views'; }
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtDateAbs(iso) { if (!iso) return ''; var d = new Date(iso); if (isNaN(d.getTime())) return ''; return String(d.getUTCDate()).padStart(2, '0') + '-' + MONTHS[d.getUTCMonth()] + '-' + d.getUTCFullYear(); }
 
 var CH = {};
 var CHLIST = [];
@@ -2271,6 +2282,7 @@ function cardHTML(v, showChannel) {
     + '<div class="sub">' + (showChannel ? '<a class="chlink" href="' + channelURL(c) + '">' + esc(c.name) + '</a> ' + tierBadge(c.tier) : '')
     + (v.views != null ? '<span>' + (showChannel ? '· ' : '') + fmtViews(v.views) + '</span>' : '')
     + (v.category ? '<span>· <a class="catlink" href="/category/' + esc(v.category.slug) + '">' + esc(v.category.name) + '</a></span>' : '')
+    + (v.published_at ? '<span>· ' + fmtDateAbs(v.published_at) + '</span>' : '')
     + '</div>' + tags + '<div class="likerow">' + likeBtnHTML(v.id, v.likes) + '<button class="addpl-btn" data-addpl="' + v.id + '" title="Add to a playlist">＋ Playlist</button></div></div></div></a>';
 }
 function miniHTML(v) {
@@ -2279,7 +2291,7 @@ function miniHTML(v) {
     + '<div class="thumb"><img loading="lazy" src="' + thumb(v.id) + '" alt="">' + (v.dur ? '<span class="dur">' + fmtDur(v.dur) + '</span>' : '') + '</div>'
     + '<div style="min-width:0"><div class="t" title="' + esc(v.title) + '">' + esc(v.title) + '</div>'
     + '<div class="sub">' + esc(c.name) + ' ' + tierBadge(c.tier) + '</div>'
-    + '<div class="sub">' + fmtViews(v.views) + '</div></div></a>';
+    + '<div class="sub">' + [v.views != null ? fmtViews(v.views) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ') + '</div></div></a>';
 }
 
 function chipsHTML() {
@@ -2623,7 +2635,7 @@ function viewWatch(id) {
       + '<button class="pill" data-addpl="' + v.id + '" title="Add to a playlist">＋ Playlist</button>'
       + '<label class="pill" title="Play a random video when this one ends"><input type="checkbox" id="autoNext"' + (autoplayNext ? ' checked' : '') + '> Autoplay</label>'
       + '<a class="pill" href="https://www.youtube.com/watch?v=' + v.id + '" target="_blank" rel="noopener">Open on YouTube ↗</a></div></div>'
-      + '<div class="desc clamp" id="desc"><div class="stats">' + [v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : ''].filter(Boolean).join(' · ') + (c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : '') + '</div>'
+      + '<div class="desc clamp" id="desc"><div class="stats">' + [v.views != null ? fmtViews(v.views) : '', v.dur ? fmtDur(v.dur) : '', v.published_at ? fmtDateAbs(v.published_at) : ''].filter(Boolean).join(' · ') + (c.featured === v.id ? ' · <span style="color:#e0b400">★ TubePlus pick for this channel</span>' : '') + '</div>'
       + '<div class="why"><b>' + tierBadge(c.tier) + ' ' + esc(c.tier) + ' tier' + (c.tag ? ' · ' + esc(c.tag) : '') + '</b>' + (c.blurb ? esc(c.blurb) : '<span style="color:var(--fg2)">No write-up for this channel.</span>') + '</div>'
       + (c.blurb && c.blurb.length > 220 ? '<button class="more" id="moreBtn">Show more</button>' : '') + '</div>'
       + (v.tags && v.tags.length ? '<div class="watchtags">' + v.tags.map(function(t) { return '<a class="tag" href="/tag/' + encodeURIComponent(t) + '">' + esc(t) + '</a>'; }).join('') + '</div>' : '')
