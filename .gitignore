@@ -1,5 +1,6 @@
 node_modules/
 .wrangler/
+worker/assets/
 __pycache__/
 *.pyc
 data/enriched.json
