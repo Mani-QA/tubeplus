@@ -83,6 +83,9 @@ const CSS = `:root {
 :root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light; } }
 
+/* Visually hidden but present for screen readers and search engines (homepage H1). */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
 /* Round icon buttons in the top bar */
 .icon-btn {
   flex: none; width: 40px; height: 40px; border-radius: 50%; border: 0; background: transparent;
@@ -1452,8 +1455,27 @@ app.get('/', async (c) => {
   const sentinel = firstPage.nextPage
     ? `<div class="sentinel" id="sentinel" data-next="${firstPage.nextPage}" data-total="${firstPage.total}"></div>`
     : ''
-  const main = `<div id="chipswrap">${chipsHTML(firstPage.total)}</div><div class="feed"><div class="grid" id="grid">${grid}</div>${sentinel}</div>`
-  const html = shellHTML({ title: 'TubePlus', total: firstPage.total, drawer: drawerHTML(categories, channels), main })
+  // Homepage SEO: the home page previously had only a bare <title>TubePlus</title>
+  // and no meta/OG/canonical/JSON-LD. Give it the same treatment as the other
+  // pages (pageHead) plus a screen-reader-only H1, so search engines see a
+  // proper title, description and an ItemList of the top videos.
+  const homeTitle = 'TubePlus — The best YouTube videos, curated by tier'
+  const homeDesc = `TubePlus is a curated guide to the best YouTube videos — ${firstPage.total.toLocaleString()} videos from ${channels.length} channels, ranked S to D across science, tech, making, history, space and more. Search, browse by category, and watch the best.`
+  const main = `<h1 class="sr-only">TubePlus — the best YouTube videos, curated by tier</h1><div id="chipswrap">${chipsHTML(firstPage.total)}</div><div class="feed"><div class="grid" id="grid">${grid}</div>${sentinel}</div>`
+  const html = shellHTML({
+    title: homeTitle,
+    total: firstPage.total,
+    drawer: drawerHTML(categories, channels),
+    main,
+    head: pageHead({
+      title: homeTitle,
+      desc: homeDesc,
+      canonical: SITE_URL + '/',
+      image: firstPage.videos[0] ? `https://i.ytimg.com/vi/${firstPage.videos[0].id}/hqdefault.jpg` : undefined,
+      ldType: 'ItemList',
+      ldItems: firstPage.videos.map((v) => ({ url: SITE_URL + watchURL(v), name: v.title })),
+    }),
+  })
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
 })
 
