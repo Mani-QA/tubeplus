@@ -43,6 +43,34 @@ app.use('*', async (c, next) => {
   await next()
 })
 
+// Workers do not CDN-cache HTML on their own. Store GET responses that opted
+// in with Cache-Control so a repeat hit (crawler or browser) skips D1.
+// Colo-local Cache API; the header TTL is the lifetime.
+app.use('*', async (c, next) => {
+  if (c.req.method !== 'GET') {
+    await next()
+    return
+  }
+  const url = new URL(c.req.url)
+  const key = new Request(url.origin + url.pathname + url.search, { method: 'GET' })
+  try {
+    const hit = await caches.default.match(key)
+    if (hit) return hit
+  } catch {
+    // Cache API is best-effort (unavailable in some local runs).
+  }
+  await next()
+  if (c.res.status !== 200) return
+  const cc = c.res.headers.get('cache-control') ?? ''
+  if (!/max-age=([1-9]\d*)/.test(cc)) return
+  try {
+    const cached = c.res.clone()
+    c.executionCtx.waitUntil(caches.default.put(key, cached).catch(() => {}))
+  } catch {
+    // ignore
+  }
+})
+
 const TIERS = ['S', 'A', 'B', 'C', 'D'] as const
 type Tier = (typeof TIERS)[number]
 const TIER_NAMES: Record<Tier, string> = {
@@ -55,6 +83,12 @@ const TIER_NAMES: Record<Tier, string> = {
 
 const PAGE_LIMIT_DEFAULT = 24
 const PAGE_LIMIT_MAX = 60
+// Edge + browser TTL. Watch pages are the crawler hotspot (sitemap is ~49k
+// URLs); listings change only when the daily ingest runs.
+const CACHE_HTML_WATCH = 24 * 60 * 60
+const CACHE_HTML_LIST = 6 * 60 * 60
+const DRAWER_TTL_SECONDS = 6 * 60 * 60
+const DRAWER_CACHE_URL = 'https://tubeplus.net/__cache/drawer-v1'
 
 // ---------------------------------------------------------------------------
 // CSS — ported from the original Tristan Tube, plus TubePlus additions:
@@ -715,12 +749,153 @@ LEFT JOIN video_tags vt ON vt.video_id = v.id
 LEFT JOIN tags t ON t.id = vt.tag_id
 LEFT JOIN likes l ON l.video_id = v.id`
 
+// Catalog-wide filters only. Anything else still needs a real COUNT.
+function isCatalogQuery(f: VideoFilter): boolean {
+  return f.channel == null && !f.tier && !f.category && !f.tag && !f.q && !f.len && !f.picks
+}
+function isChannelOnlyQuery(f: VideoFilter): boolean {
+  return f.channel != null && !f.tier && !f.category && !f.tag && !f.q && !f.len && !f.picks
+}
+
+// MAX(rowid) is a primary-key endpoint read (EXPLAIN: SEARCH), not a scan.
+// Cached in the isolate so a crawl does not repeat it. Rowids are dense
+// (videos are inserted, not deleted); a miss falls through to the next rowid.
+let rowidHiMemo: { exp: number; hi: number } | null = null
+async function videoRowidHi(db: D1Database): Promise<number> {
+  const now = Date.now()
+  if (rowidHiMemo && rowidHiMemo.exp > now) return rowidHiMemo.hi
+  const row = await db.prepare('SELECT MAX(rowid) AS hi FROM videos').first<{ hi: number | null }>()
+  const hi = row?.hi ?? 0
+  rowidHiMemo = { exp: now + DRAWER_TTL_SECONDS * 1000, hi }
+  return hi
+}
+
+// `limit` distinct video ids spread across the table. ~1 row read per id.
+async function sampleVideoIds(db: D1Database, limit: number): Promise<string[]> {
+  if (limit <= 0) return []
+  const hi = await videoRowidHi(db)
+  if (hi <= 0) return []
+  const want = Math.min(limit, hi)
+  const probes: number[] = []
+  const used = new Set<number>()
+  while (probes.length < want) {
+    const rowid = 1 + Math.floor(Math.random() * hi)
+    if (used.has(rowid)) continue
+    used.add(rowid)
+    probes.push(rowid)
+  }
+  const ph = probes.map(() => '?').join(',')
+  const picked = await db
+    .prepare(`SELECT id FROM videos WHERE rowid IN (${ph})`)
+    .bind(...probes)
+    .all<{ id: string }>()
+  const ids: string[] = []
+  const seen = new Set<string>()
+  for (const r of picked.results ?? []) {
+    if (!seen.has(r.id)) {
+      seen.add(r.id)
+      ids.push(r.id)
+    }
+  }
+  if (ids.length < want) {
+    const start = 1 + Math.floor(Math.random() * hi)
+    const more = await db
+      .prepare('SELECT id FROM videos WHERE rowid >= ? ORDER BY rowid LIMIT ?')
+      .bind(start, want - ids.length)
+      .all<{ id: string }>()
+    for (const r of more.results ?? []) {
+      if (!seen.has(r.id)) {
+        seen.add(r.id)
+        ids.push(r.id)
+      }
+    }
+  }
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = ids[i]
+    ids[i] = ids[j]
+    ids[j] = tmp
+  }
+  return ids.slice(0, want)
+}
+
+async function videosByIds(db: D1Database, ids: string[]): Promise<ApiVideo[]> {
+  if (!ids.length) return []
+  const ph = ids.map(() => '?').join(',')
+  const rows = await db
+    .prepare(`${VIDEO_SELECT} WHERE v.id IN (${ph}) GROUP BY v.id`)
+    .bind(...ids)
+    .all<VideoRow>()
+  const byId = new Map((rows.results ?? []).map((r) => [r.id, toApiVideo(r)]))
+  const out: ApiVideo[] = []
+  for (const id of ids) {
+    const v = byId.get(id)
+    if (v) out.push(v)
+  }
+  return out
+}
+
+async function countVideos(db: D1Database, f: VideoFilter): Promise<number> {
+  // Unfiltered and channel-only totals are the precomputed channel counts.
+  // The old COUNT joined videos × channels × categories (~3× a full scan).
+  if (isCatalogQuery(f) || isChannelOnlyQuery(f)) {
+    const drawer = await drawerData(db)
+    if (isCatalogQuery(f)) return drawer.total
+    const ch = drawer.channels.find((c) => c.id === f.channel)
+    return ch?.video_count ?? ch?.n ?? 0
+  }
+  const { clause, params } = videoWhere(f)
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS total FROM videos v
+       JOIN channels c ON c.id = v.channel_id
+       LEFT JOIN categories cat ON cat.id = v.category_id ${clause}`,
+    )
+    .bind(...params)
+    .first<{ total: number }>()
+  return row?.total ?? 0
+}
+
+async function listShuffled(
+  db: D1Database,
+  f: VideoFilter,
+  page: number,
+  limit: number,
+  withTotal: boolean,
+): Promise<{ videos: ApiVideo[]; nextPage: number | null; total: number }> {
+  const { clause, params } = videoWhere(f)
+  let ids: string[]
+  if (!clause) {
+    // Hot path: watch-page "up next" and /api/random. Do not ORDER BY RANDOM()
+    // over the tag join — that scanned ~394k rows to return 13.
+    ids = await sampleVideoIds(db, limit + 1)
+  } else {
+    const rows = await db
+      .prepare(
+        `SELECT v.id FROM videos v
+         JOIN channels c ON c.id = v.channel_id
+         LEFT JOIN categories cat ON cat.id = v.category_id
+         ${clause} ORDER BY RANDOM() LIMIT ?`,
+      )
+      .bind(...params, limit + 1)
+      .all<{ id: string }>()
+    ids = (rows.results ?? []).map((r) => r.id)
+  }
+  const hasMore = ids.length > limit
+  const videos = await videosByIds(db, ids.slice(0, limit))
+  const total = withTotal ? await countVideos(db, f) : 0
+  return { videos, nextPage: hasMore ? page + 1 : null, total }
+}
+
 async function listVideos(
   db: D1Database,
   f: VideoFilter,
   page: number,
   limit: number,
+  opts?: { withTotal?: boolean },
 ): Promise<{ videos: ApiVideo[]; nextPage: number | null; total: number }> {
+  const withTotal = opts?.withTotal !== false
+  if (f.sort === 'shuffle') return listShuffled(db, f, page, limit, withTotal)
   const { clause, params } = videoWhere(f)
   const order = videoOrder(f.sort)
   const offset = (page - 1) * limit
@@ -729,20 +904,13 @@ async function listVideos(
     .prepare(`${VIDEO_SELECT} ${clause} GROUP BY v.id ORDER BY ${order} LIMIT ? OFFSET ?`)
     .bind(...params, limit + 1, offset)
     .all<VideoRow>()
-  const count = await db
-    .prepare(
-      `SELECT COUNT(*) AS total FROM videos v
-       JOIN channels c ON c.id = v.channel_id
-       LEFT JOIN categories cat ON cat.id = v.category_id ${clause}`,
-    )
-    .bind(...params)
-    .first<{ total: number }>()
   const all = rows.results ?? []
   const hasMore = all.length > limit
+  const total = withTotal ? await countVideos(db, f) : 0
   return {
     videos: all.slice(0, limit).map(toApiVideo),
     nextPage: hasMore ? page + 1 : null,
-    total: count?.total ?? 0,
+    total,
   }
 }
 
@@ -803,11 +971,8 @@ app.get('/api/videos/:id', async (c) => {
     .first<VideoRow>()
   if (!row) return json({ error: 'Video not found' }, 404)
   const v = toApiVideo(row)
-  // Channel video count for the watch page header.
-  const cnt = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM videos WHERE channel_id = ?')
-    .bind(v.channel.id)
-    .first<{ n: number }>()
-  return json({ ...v, channel: { ...v.channel, video_count: cnt?.n ?? v.channel.n ?? 0 } }, 200, 60)
+  // channels.n is maintained on write (and backfilled by the migration).
+  return json({ ...v, channel: { ...v.channel, video_count: v.channel.n ?? 0 } }, 200, 60)
 })
 
 app.post('/api/videos/:id/like', async (c) => {
@@ -836,12 +1001,8 @@ app.post('/api/videos/:id/like', async (c) => {
 })
 
 app.get('/api/categories', async (c) => {
-  const rows = await c.env.DB.prepare(
-    `SELECT cat.id, cat.slug, cat.name, COUNT(v.id) AS count
-     FROM categories cat LEFT JOIN videos v ON v.category_id = cat.id
-     GROUP BY cat.id ORDER BY count DESC, cat.name ASC`,
-  ).all<CategoryRow>()
-  return json({ categories: rows.results ?? [] }, 200, 300)
+  const { categories } = await drawerData(c.env.DB)
+  return json({ categories }, 200, DRAWER_TTL_SECONDS)
 })
 
 app.get('/api/tags', async (c) => {
@@ -859,21 +1020,16 @@ app.get('/api/tags', async (c) => {
 })
 
 app.get('/api/random', async (c) => {
-  const row = await c.env.DB.prepare(`${VIDEO_SELECT} GROUP BY v.id ORDER BY RANDOM() LIMIT 1`).first<VideoRow>()
-  if (!row) return json({ error: 'No videos' }, 404)
-  return json(toApiVideo(row), 200, 0)
+  const ids = await sampleVideoIds(c.env.DB, 1)
+  const videos = await videosByIds(c.env.DB, ids)
+  if (!videos.length) return json({ error: 'No videos' }, 404)
+  return json(videos[0], 200, 0)
 })
 
 app.get('/api/channels', async (c) => {
-  const rows = await c.env.DB.prepare(
-    `SELECT ch.id, ch.name, ch.url, ch.tier, ch.tag, ch.blurb, ch.featured, ch.n,
-       COUNT(v.id) AS video_count
-     FROM channels ch LEFT JOIN videos v ON v.channel_id = ch.id
-     GROUP BY ch.id
-     ORDER BY CASE ch.tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 ELSE 5 END, ch.name ASC`,
-  ).all<ChannelRow>()
-  const channels = (rows.results ?? []).map((ch) => ({ ...ch, slug: channelSlug(ch.name) }))
-  return json({ channels }, 200, 300)
+  const { channels } = await drawerData(c.env.DB)
+  const list = channels.map((ch) => ({ ...ch, slug: channelSlug(ch.name) }))
+  return json({ channels: list }, 200, DRAWER_TTL_SECONDS)
 })
 
 // ---------------------------------------------------------------------------
@@ -1293,27 +1449,83 @@ function watchHTML(v: ApiVideo, upNext: ApiVideo[], channelCount: number): strin
     + `<script id="ssrWatch" type="application/json">${ssrData}</script>`
 }
 
-async function drawerData(db: D1Database): Promise<{ categories: CategoryRow[]; channels: ChannelRow[]; total: number }> {
+// Public catalog snapshot. Module memo + Cache API so an HTML crawl does not
+// re-scan videos on every page. Counts come from channels.n (one row per
+// channel), which matches per-video category counts because a video's
+// category is its channel's category.
+interface Drawer {
+  categories: CategoryRow[]
+  channels: ChannelRow[]
+  total: number
+}
+let drawerMemo: { exp: number; data: Drawer } | null = null
+let drawerFlight: Promise<Drawer> | null = null
+
+async function drawerData(db: D1Database): Promise<Drawer> {
+  const now = Date.now()
+  if (drawerMemo && drawerMemo.exp > now) return drawerMemo.data
+  if (!drawerFlight) {
+    drawerFlight = loadDrawer(db).finally(() => {
+      drawerFlight = null
+    })
+  }
+  return drawerFlight
+}
+
+async function loadDrawer(db: D1Database): Promise<Drawer> {
+  try {
+    const hit = await caches.default.match(DRAWER_CACHE_URL)
+    if (hit) {
+      const data = (await hit.json()) as Drawer
+      drawerMemo = { exp: Date.now() + DRAWER_TTL_SECONDS * 1000, data }
+      return data
+    }
+  } catch {
+    // ignore
+  }
+  const data = await queryDrawer(db)
+  drawerMemo = { exp: Date.now() + DRAWER_TTL_SECONDS * 1000, data }
+  try {
+    await caches.default.put(
+      DRAWER_CACHE_URL,
+      new Response(JSON.stringify(data), {
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': `public, max-age=${DRAWER_TTL_SECONDS}`,
+        },
+      }),
+    )
+  } catch {
+    // ignore
+  }
+  return data
+}
+
+async function queryDrawer(db: D1Database): Promise<Drawer> {
   const [catsRes, chansRes, totalRes] = await Promise.all([
     db
       .prepare(
-        `SELECT cat.id, cat.slug, cat.name, COUNT(v.id) AS count
-         FROM categories cat LEFT JOIN videos v ON v.category_id = cat.id
-         GROUP BY cat.id ORDER BY count DESC, cat.name ASC`,
+        `SELECT cat.id, cat.slug, cat.name, COALESCE(SUM(ch.n), 0) AS count
+         FROM categories cat
+         LEFT JOIN channels ch ON ch.category_id = cat.id
+         GROUP BY cat.id
+         ORDER BY count DESC, cat.name ASC`,
       )
       .all<CategoryRow>(),
     db
       .prepare(
-        `SELECT ch.id, ch.name, ch.url, ch.tier, ch.tag, ch.blurb, ch.featured, ch.n,
-           COUNT(v.id) AS video_count
-         FROM channels ch LEFT JOIN videos v ON v.channel_id = ch.id
-         GROUP BY ch.id
-         ORDER BY CASE ch.tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 ELSE 5 END, ch.name ASC`,
+        `SELECT id, name, url, tier, tag, blurb, featured, n, n AS video_count
+         FROM channels
+         ORDER BY CASE tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 ELSE 5 END, name ASC`,
       )
       .all<ChannelRow>(),
-    db.prepare('SELECT COUNT(*) AS total FROM videos').first<{ total: number }>(),
+    db.prepare('SELECT COALESCE(SUM(n), 0) AS total FROM channels').first<{ total: number }>(),
   ])
-  return { categories: catsRes.results ?? [], channels: chansRes.results ?? [], total: totalRes?.total ?? 0 }
+  return {
+    categories: catsRes.results ?? [],
+    channels: chansRes.results ?? [],
+    total: totalRes?.total ?? 0,
+  }
 }
 
 function drawerHTML(categories: CategoryRow[], channels: ChannelRow[]): string {
@@ -1430,27 +1642,11 @@ ${opts.head ?? ''}
 // ---------------------------------------------------------------------------
 app.get('/', async (c) => {
   const db = c.env.DB
-  const [catsRes, chansRes, firstPage] = await Promise.all([
-    db
-      .prepare(
-        `SELECT cat.id, cat.slug, cat.name, COUNT(v.id) AS count
-         FROM categories cat LEFT JOIN videos v ON v.category_id = cat.id
-         GROUP BY cat.id ORDER BY count DESC, cat.name ASC`,
-      )
-      .all<CategoryRow>(),
-    db
-      .prepare(
-        `SELECT ch.id, ch.name, ch.url, ch.tier, ch.tag, ch.blurb, ch.featured, ch.n,
-           COUNT(v.id) AS video_count
-         FROM channels ch LEFT JOIN videos v ON v.channel_id = ch.id
-         GROUP BY ch.id
-         ORDER BY CASE ch.tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 ELSE 5 END, ch.name ASC`,
-      )
-      .all<ChannelRow>(),
+  const [drawer, firstPage] = await Promise.all([
+    drawerData(db),
     listVideos(db, { sort: 'views' }, 1, PAGE_LIMIT_DEFAULT),
   ])
-  const categories = catsRes.results ?? []
-  const channels = chansRes.results ?? []
+  const { categories, channels } = drawer
   const grid = firstPage.videos.map((v) => cardHTML(v)).join('')
   const sentinel = firstPage.nextPage
     ? `<div class="sentinel" id="sentinel" data-next="${firstPage.nextPage}" data-total="${firstPage.total}"></div>`
@@ -1476,7 +1672,7 @@ app.get('/', async (c) => {
       ldItems: firstPage.videos.map((v) => ({ url: SITE_URL + watchURL(v), name: v.title })),
     }),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_LIST}` } })
 })
 
 app.get('/health', (c) => c.text('ok'))
@@ -1507,11 +1703,10 @@ app.get('/watch/:id/:slug?', async (c) => {
   if (c.req.param('slug') !== (v.slug || undefined)) {
     return c.redirect(watchURL(v), 301)
   }
-  const cnt = await db.prepare('SELECT COUNT(*) AS n FROM videos WHERE channel_id = ?').bind(v.channel.id).first<{ n: number }>()
-  const channelCount = cnt?.n ?? v.channel.n ?? 0
+  const channelCount = v.channel.n ?? 0
   const [sameChannel, shuffled] = await Promise.all([
-    listVideos(db, { channel: v.channel.id, sort: 'views' }, 1, 8),
-    listVideos(db, { sort: 'shuffle' }, 1, 12),
+    listVideos(db, { channel: v.channel.id, sort: 'views' }, 1, 8, { withTotal: false }),
+    listVideos(db, { sort: 'shuffle' }, 1, 12, { withTotal: false }),
   ])
   const seen = new Set<string>([v.id])
   const upNext: ApiVideo[] = []
@@ -1530,7 +1725,7 @@ app.get('/watch/:id/:slug?', async (c) => {
     main: watchHTML(v, upNext, channelCount),
     head: watchHead(v, desc),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_WATCH}` } })
 })
 
 // ---------------------------------------------------------------------------
@@ -1646,7 +1841,7 @@ app.get('/new', async (c) => {
     }),
     head: pageHead({ title: 'New videos — TubePlus', desc, canonical: SITE_URL + '/new', ldType: 'CollectionPage' }),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_LIST}` } })
 })
 
 app.get('/category/:slug', async (c) => {
@@ -1672,7 +1867,7 @@ app.get('/category/:slug', async (c) => {
     }),
     head: pageHead({ title: `${cat.name} videos — TubePlus`, desc, canonical: SITE_URL + '/category/' + slug, ldType: 'CollectionPage' }),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_LIST}` } })
 })
 
 app.get('/tag/:name', async (c) => {
@@ -1698,7 +1893,7 @@ app.get('/tag/:name', async (c) => {
     }),
     head: pageHead({ title: `#${name} — TubePlus`, desc, canonical: SITE_URL + '/tag/' + encodeURIComponent(name), ldType: 'CollectionPage' }),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_LIST}` } })
 })
 
 app.get('/channel/:id/:slug?', async (c) => {
@@ -1731,7 +1926,7 @@ app.get('/channel/:id/:slug?', async (c) => {
     }),
     head: pageHead({ title: `${ch.name} — TubePlus`, desc, canonical: SITE_URL + channelURL(ch), ldType: 'CollectionPage' }),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_LIST}` } })
 })
 
 // --- Part C: add a channel (goes live immediately, no approval queue) -------
@@ -1942,7 +2137,7 @@ ${(totalRes?.n ?? 0) > page * limit ? `<p class="pagesub"><a href="/playlists?pa
     main,
     head: pageHead({ title: 'Playlists — TubePlus', desc: 'Public playlists made from the TubePlus catalog.', canonical: SITE_URL + '/playlists', ldType: 'CollectionPage' }),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_LIST}` } })
 })
 
 function playlistNewFormHTML(cats: CategoryRow[], error?: string, prev?: { title?: string; description?: string; videos?: string }): string {
@@ -2081,7 +2276,7 @@ app.get('/playlist/:id/:slug?', async (c) => {
       ldItems: videos.map((v) => ({ url: SITE_URL + watchURL(v), name: v.title })),
     }),
   })
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } })
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': `public, max-age=${CACHE_HTML_LIST}` } })
 })
 
 const SITEMAP_SHARD = 10000

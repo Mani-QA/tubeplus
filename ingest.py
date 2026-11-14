@@ -285,6 +285,11 @@ def main():
     for t, tid in sorted(new_tags.items(), key=lambda kv: kv[1]):
         sql_lines.insert(2, f"INSERT OR IGNORE INTO tags (id, name) VALUES "
                             f"({tid}, {sql_str(t)});")
+    # channels.n is what the site uses for drawer and result counts.
+    for cid in sorted({int(ch["id"]) for ch, _e, _c in new_entries}):
+        sql_lines.append(
+            "UPDATE channels SET n = (SELECT COUNT(*) FROM videos "
+            f"WHERE channel_id = {cid}) WHERE id = {cid};")
     sql_lines.append("COMMIT;")
     with open(out_path, "w") as f:
         f.write("\n".join(sql_lines) + "\n")
