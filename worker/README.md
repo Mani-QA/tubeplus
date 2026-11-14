@@ -105,16 +105,19 @@ only for videos added by the RSS ingest (seed videos are NULL).
 
 ## Deploy
 
+There is no GitHub Actions workflow. Deploy is manual, from this directory,
+and it does **not** apply D1 migrations. Apply the migration first so
+`channels.n` matches the video table, then deploy:
+
 ```bash
-npm install
+npm ci
 npm run typecheck   # tsc --noEmit
+npx wrangler d1 migrations apply tubeplus-db --remote
 npm run deploy      # wrangler deploy
 ```
 
-The D1 database must already exist and be populated (schema + the videos).
-Schema changes live in `../data/migrate_v3.sql` and are applied **manually**
-(`wrangler d1 execute tubeplus-db --remote --file ../data/migrate_v3.sql`);
-the GitHub Actions deploy does not apply migrations.
+`../data/migrate_v3.sql` was already applied on the live database by hand.
+Do not re-run it. New migrations live in `migrations/`.
 
 ## Local development (no Cloudflare credentials needed)
 

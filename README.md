@@ -33,7 +33,7 @@ data/                    The data pipeline + seeds
   backfill_channel_category.sql
                          156 UPDATEs setting channels.category_id
 ingest.py                Daily RSS ingest: new videos into D1
-.github/workflows/       deploy.yml — push to main deploys the Worker
+worker/migrations/        D1 migrations applied by hand (not on deploy)
 ```
 
 ## Run locally
@@ -48,14 +48,30 @@ npm run dev    # http://localhost:8787
 
 ## Deploy
 
-Push to `main` — GitHub Actions runs `npm ci` + `npx wrangler deploy`
-(needs the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repo
-secrets). **The workflow does not apply D1 migrations** — those are manual:
+There is no GitHub Actions workflow in this repo (`.github/workflows` is
+absent, and GitHub returns 404 for it). The last push to `main` does not
+by itself update the live Worker. Production deploys are a manual
+`wrangler deploy` from a `worker/` checkout that has Cloudflare credentials.
+`data/gen_static.py` documents one such checkout on a separate host
+(`~/tubeplus/worker`, wrangler on that machine) which regenerates the
+static `/videos/` snapshot and redeploys. That is separate from this
+GitHub repo — the live Worker can change without a push here.
+
+From `worker/`, after `npm ci`:
 
 ```bash
-# from worker/
-npx wrangler d1 execute tubeplus-db --remote --file ../data/migrate_v3.sql
+# 1. Backfill channels.n on production D1 (required before the new
+#    counts are right). Wrangler prompts for confirmation.
+npx wrangler d1 migrations apply tubeplus-db --remote
+
+# 2. Deploy the Worker. This does not apply migrations.
+npx wrangler deploy
 ```
+
+`data/migrate_v3.sql` was applied by hand already
+(`npx wrangler d1 execute tubeplus-db --remote --file ../data/migrate_v3.sql`).
+Do not re-run it. New schema changes go in `worker/migrations/` and are
+applied with the command above. Nothing in this repo applies them on deploy.
 
 ## Daily ingest (new videos)
 
