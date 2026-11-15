@@ -198,8 +198,7 @@ def main():
     out_path = args.out or os.path.join(
         DATA, "ingest_" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".sql")
     sql_lines = ["-- TubePlus RSS ingest (ingest.py). INSERT OR IGNORE: "
-                 "re-running is safe.",
-                 "BEGIN TRANSACTION;"]
+                 "re-running is safe."]
     new_tags = {}  # name -> id (assigned on the fly)
     report = []
     total_new = 0
@@ -290,7 +289,9 @@ def main():
         sql_lines.append(
             "UPDATE channels SET n = (SELECT COUNT(*) FROM videos "
             f"WHERE channel_id = {cid}) WHERE id = {cid};")
-    sql_lines.append("COMMIT;")
+    # NOTE: no BEGIN TRANSACTION / COMMIT — `wrangler d1 execute --remote`
+    # rejects explicit transaction statements (local D1 allows them).
+    # Each INSERT is INSERT OR IGNORE, so the file is idempotent without it.
     with open(out_path, "w") as f:
         f.write("\n".join(sql_lines) + "\n")
 
