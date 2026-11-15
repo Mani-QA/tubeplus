@@ -12,19 +12,26 @@ with the same slugify as the Worker; a wrong slug 301s to canonical):
 Channels: [name, tier, category_slug].
 
 Usage:
-  python3 gen_static.py [--local] [--out PATH]
+  python3 gen_static.py [--local] [--out PATH] [--home] [--both]
     --local  run wrangler directly (use on the box, where wrangler
              handles --remote). Default: SSH to the box from the VM.
     --out    output HTML path (default: the Worker's assets dir).
+    --home   generate the homepage variant (root, /) with the homepage
+             title/canonical/OG/ItemList instead of the /videos/ snapshot.
+    --both   generate both the /videos/ snapshot and the homepage variant
+             from a single D1 fetch.
 
 Regenerate whenever new videos arrive (daily ingest cron runs this
 after the RSS ingest + API enrichment, then redeploys the Worker so
 the new asset goes live).
 """
 import argparse
+import html
 import json
+import re
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timezone
 
 BOX = "ubuntu@129.154.35.102"
@@ -32,7 +39,24 @@ SSH_KEY = "/home/hatch/.ssh/id_ed25519"
 WRANGLER = "/home/ubuntu/.npm-global/bin/wrangler"
 OUT_VM = "/home/hatch/workspace/tubeplus/worker/assets/videos/index.html"
 OUT_BOX = "/home/ubuntu/tubeplus/worker/assets/videos/index.html"
+OUT_HOME_VM = "/home/hatch/workspace/tubeplus/worker/assets/index.html"
+OUT_HOME_BOX = "/home/ubuntu/tubeplus/worker/assets/index.html"
+SITE_URL = "https://tubeplus.net"
 BATCH = 10000
+
+
+def slugify(title):
+    """Mirror the Worker's slugify (src/index.ts) for canonical watch URLs."""
+    t = unicodedata.normalize("NFKD", title or "")
+    t = "".join(ch for ch in t if ord(ch) < 128).lower()
+    t = re.sub(r"[^a-z0-9]+", "-", t)
+    t = re.sub(r"^-+|-+$", "", t)
+    if len(t) > 60:
+        head = t[:60]
+        idx = head.rfind("-")
+        cut = head[:idx] if idx >= 0 else head
+        t = re.sub(r"^-+|-+$", "", cut if cut else re.sub(r"-+$", "", head))
+    return t
 
 
 def run_ssh(cmd, timeout=180):
@@ -97,9 +121,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>All videos - TubePlus</title>
-<meta name="description" content="Every video on TubePlus — __COUNT__ videos from __CHANS__ channels. A fast static snapshot, no database needed.">
-<link rel="canonical" href="https://tubeplus.net/videos/">
+<title>__TITLE__</title>
+<meta name="description" content="__DESC__">
+__HEAD_EXTRA__<link rel="canonical" href="__CANONICAL__">
 <style>
 :root{--bg:#0f0f0f;--fg:#f1f1f1;--fg2:#aaa;--bg3:#272727;--bg4:#3d3d3d;--accent:#ff0033}
 *{box-sizing:border-box}
@@ -133,8 +157,8 @@ footer a{color:#3ea6ff}
 </head>
 <body>
 <div class="wrap">
-<header><h1><a href="/">TubePlus</a> — All videos</h1></header>
-<p class="sub"><b>__COUNT__</b> videos · <b>__CHANS__</b> channels · static snapshot, updated <b>__UPDATED__</b> · <a href="/">back to the site ↗</a></p>
+<header><h1>__H1__</h1></header>
+<p class="sub">__SUB__</p>
 <div class="controls">
 <input id="q" type="search" placeholder="Search __COUNT__ videos…" autocomplete="off">
 <select id="sort"><option value="views">Most viewed</option><option value="new">Newest first</option><option value="old">Oldest first</option><option value="title">Title A–Z</option><option value="long">Longest</option></select>
@@ -144,7 +168,7 @@ footer a{color:#3ea6ff}
 <p id="count"></p>
 <div id="list"></div>
 <button id="more">Show more</button>
-<footer>Fast static copy of the catalog — no database, no Worker. Video pages, search and the full site live at <a href="https://tubeplus.net/">tubeplus.net</a>.</footer>
+<footer>__FOOTER__</footer>
 </div>
 <script>
 var VIDEOS = __VIDEOS_JSON__;
@@ -214,12 +238,129 @@ apply();
 """
 
 
+def home_head_extra(videos_json, count, n_chans):
+    """OG/Twitter + JSON-LD ItemList for the homepage variant.
+
+    Mirrors the SSR homepage SEO in src/index.ts pageHead: ItemList of the
+    top 24 most-viewed videos, OG image = top video's thumbnail.
+    """
+    title = "TubePlus — The best YouTube videos, curated by tier"
+    desc = (
+        f"TubePlus is a curated guide to the best YouTube videos — "
+        f"{count:,} videos from {n_chans} channels, ranked S to D across "
+        f"science, tech, making, history, space and more. Search, browse "
+        f"by category, and watch the best."
+    )
+    e = html.escape
+    parts = [
+        f'<meta property="og:title" content="{e(title)}">',
+        f'<meta property="og:description" content="{e(desc)}">',
+        '<meta property="og:type" content="website">',
+        f'<meta property="og:url" content="{SITE_URL}/">',
+    ]
+    top_id = videos_json[0][0] if videos_json else ""
+    if top_id:
+        image = f"https://i.ytimg.com/vi/{top_id}/hqdefault.jpg"
+        parts.append(f'<meta property="og:image" content="{e(image)}">')
+        parts.append('<meta name="twitter:card" content="summary_large_image">')
+        parts.append(f'<meta name="twitter:image" content="{e(image)}">')
+    else:
+        parts.append('<meta name="twitter:card" content="summary">')
+    parts.append(f'<meta name="twitter:title" content="{e(title)}">')
+    parts.append(f'<meta name="twitter:description" content="{e(desc)}">')
+    items = []
+    for i, v in enumerate(videos_json[:24]):
+        url = f"{SITE_URL}/watch/{v[0]}/{slugify(v[1])}"
+        items.append({"@type": "ListItem", "position": i + 1, "url": url, "name": v[1]})
+    ld = {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "name": title,
+        "description": desc,
+        "url": SITE_URL + "/",
+        "itemListElement": items,
+    }
+    ld_json = json.dumps(ld, ensure_ascii=False).replace("<", "\\u003c")
+    parts.append(f'<script type="application/ld+json">{ld_json}</script>')
+    return "\n".join(parts) + "\n"
+
+
+def build_html(variant, videos_json, channels_json, updated):
+    """Render the static snapshot HTML for a variant ('home' or 'videos')."""
+    count = len(videos_json)
+    n_chans = len(channels_json)
+    count_fmt = f"{count:,}"
+    if variant == "home":
+        title = "TubePlus — The best YouTube videos, curated by tier"
+        desc = (
+            f"TubePlus is a curated guide to the best YouTube videos — "
+            f"{count_fmt} videos from {n_chans} channels, ranked S to D across "
+            f"science, tech, making, history, space and more. Search, browse "
+            f"by category, and watch the best."
+        )
+        canonical = SITE_URL + "/"
+        head_extra = home_head_extra(videos_json, count, n_chans)
+        h1 = '<a href="/">TubePlus</a> — The best YouTube videos, curated by tier'
+        sub = (
+            f"The best YouTube videos, curated by tier — <b>{count_fmt}</b> videos · "
+            f"<b>{n_chans}</b> channels · static snapshot, updated <b>{updated}</b>"
+        )
+        footer = (
+            "TubePlus — the best YouTube videos, curated by tier. "
+            "Fast static copy of the catalog — no database, no Worker."
+        )
+    else:  # videos
+        title = "All videos - TubePlus"
+        desc = (
+            f"Every video on TubePlus — {count_fmt} videos from {n_chans} channels. "
+            f"A fast static snapshot, no database needed."
+        )
+        canonical = SITE_URL + "/videos/"
+        head_extra = ""
+        h1 = '<a href="/">TubePlus</a> — All videos'
+        sub = (
+            f"<b>{count_fmt}</b> videos · <b>{n_chans}</b> channels · "
+            f"static snapshot, updated <b>{updated}</b> · "
+            f'<a href="/">back to the site ↗</a>'
+        )
+        footer = (
+            "Fast static copy of the catalog — no database, no Worker. "
+            "Video pages, search and the full site live at "
+            '<a href="https://tubeplus.net/">tubeplus.net</a>.'
+        )
+    return (
+        HTML_TEMPLATE.replace("__TITLE__", html.escape(title))
+        .replace("__DESC__", html.escape(desc))
+        .replace("__CANONICAL__", canonical)
+        .replace("__HEAD_EXTRA__", head_extra)
+        .replace("__H1__", h1)
+        .replace("__SUB__", sub)
+        .replace("__FOOTER__", footer)
+        .replace("__COUNT__", count_fmt)
+        .replace("__CHANS__", str(n_chans))
+        .replace("__UPDATED__", updated)
+        .replace(
+            "__VIDEOS_JSON__",
+            json.dumps(videos_json, separators=(",", ":"), ensure_ascii=False).replace(
+                "<", "\\u003c"
+            ),
+        )
+        .replace(
+            "__CHANNELS_JSON__",
+            json.dumps(channels_json, separators=(",", ":"), ensure_ascii=False).replace(
+                "<", "\\u003c"
+            ),
+        )
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--local", action="store_true", help="run wrangler directly (on the box)")
     ap.add_argument("--out", default=None, help="output HTML path (default: VM staging, or the box assets dir with --local)")
+    ap.add_argument("--home", action="store_true", help="generate the homepage variant (root, /) instead of /videos/")
+    ap.add_argument("--both", action="store_true", help="generate both the /videos/ snapshot and the homepage variant")
     args = ap.parse_args()
-    out = args.out or (OUT_BOX if args.local else OUT_VM)
 
     # Channels first (small), then all videos in batches.
     chans = d1_query(
@@ -273,26 +414,20 @@ def main():
         )
 
     updated = datetime.now(timezone.utc).strftime("%d-%b-%Y %H:%M UTC")
-    html = (
-        HTML_TEMPLATE.replace("__COUNT__", f"{len(videos_json):,}")
-        .replace("__CHANS__", str(len(channels_json)))
-        .replace("__UPDATED__", updated)
-        .replace(
-            "__VIDEOS_JSON__",
-            json.dumps(videos_json, separators=(",", ":"), ensure_ascii=False).replace(
-                "<", "\\u003c"
-            ),
-        )
-        .replace(
-            "__CHANNELS_JSON__",
-            json.dumps(channels_json, separators=(",", ":"), ensure_ascii=False).replace(
-                "<", "\\u003c"
-            ),
-        )
-    )
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"wrote {out} ({len(html)/1e6:.2f} MB)")
+    if args.both:
+        outs = [
+            ("videos", args.out or (OUT_BOX if args.local else OUT_VM)),
+            ("home", OUT_HOME_BOX if args.local else OUT_HOME_VM),
+        ]
+    elif args.home:
+        outs = [("home", args.out or (OUT_HOME_BOX if args.local else OUT_HOME_VM))]
+    else:
+        outs = [("videos", args.out or (OUT_BOX if args.local else OUT_VM))]
+    for variant, out in outs:
+        html = build_html(variant, videos_json, channels_json, updated)
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"wrote {out} ({len(html)/1e6:.2f} MB)")
 
 
 if __name__ == "__main__":
