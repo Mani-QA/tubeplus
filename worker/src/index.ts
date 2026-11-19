@@ -673,7 +673,7 @@ interface VideoFilter {
   picks?: boolean
 }
 
-function videoWhere(f: VideoFilter): { clause: string; params: unknown[] } {
+function videoWhere(f: VideoFilter, opts?: { skipTag?: boolean }): { clause: string; params: unknown[] } {
   const wh: string[] = []
   const params: unknown[] = []
   if (f.channel != null) {
@@ -693,7 +693,7 @@ function videoWhere(f: VideoFilter): { clause: string; params: unknown[] } {
       params.push(f.category)
     }
   }
-  if (f.tag) {
+  if (f.tag && !opts?.skipTag) {
     if (/^\d+$/.test(f.tag)) {
       wh.push('EXISTS (SELECT 1 FROM video_tags vt WHERE vt.video_id = v.id AND vt.tag_id = ?)')
       params.push(parseInt(f.tag, 10))
@@ -755,6 +755,9 @@ function isCatalogQuery(f: VideoFilter): boolean {
 }
 function isChannelOnlyQuery(f: VideoFilter): boolean {
   return f.channel != null && !f.tier && !f.category && !f.tag && !f.q && !f.len && !f.picks
+}
+function isTagOnlyQuery(f: VideoFilter): boolean {
+  return !!f.tag && f.channel == null && !f.tier && !f.category && !f.q && !f.len && !f.picks
 }
 
 // MAX(rowid) is a primary-key endpoint read (EXPLAIN: SEARCH), not a scan.
@@ -835,6 +838,80 @@ async function videosByIds(db: D1Database, ids: string[]): Promise<ApiVideo[]> {
   return out
 }
 
+// Tag name -> id and tag-only counts, memoized like the drawer (6 hours).
+const tagIdMemo = new Map<string, { exp: number; id: number | null }>()
+const tagCountMemo = new Map<number, { exp: number; n: number }>()
+
+async function resolveTagId(db: D1Database, tag: string): Promise<number | null> {
+  if (/^\d+$/.test(tag)) return parseInt(tag, 10)
+  const now = Date.now()
+  const hit = tagIdMemo.get(tag)
+  if (hit && hit.exp > now) return hit.id
+  const row = await db.prepare('SELECT id FROM tags WHERE name = ?').bind(tag).first<{ id: number }>()
+  const id = row?.id ?? null
+  tagIdMemo.set(tag, { exp: now + DRAWER_TTL_SECONDS * 1000, id })
+  return id
+}
+
+async function countVideosForTag(db: D1Database, tagId: number): Promise<number> {
+  const now = Date.now()
+  const hit = tagCountMemo.get(tagId)
+  if (hit && hit.exp > now) return hit.n
+  const row = await db
+    .prepare('SELECT COUNT(*) AS n FROM video_tags WHERE tag_id = ?')
+    .bind(tagId)
+    .first<{ n: number }>()
+  const n = row?.n ?? 0
+  tagCountMemo.set(tagId, { exp: now + DRAWER_TTL_SECONDS * 1000, n })
+  return n
+}
+
+function listFromAndJoins(f: VideoFilter, tagId: number | null): { from: string; joinSql: string } {
+  const from = tagId != null
+    ? 'video_tags vt JOIN videos v ON v.id = vt.video_id'
+    : 'videos v'
+  const joins: string[] = []
+  if (f.tier) joins.push('JOIN channels c ON c.id = v.channel_id')
+  if (f.category && !/^\d+$/.test(f.category)) {
+    joins.push('LEFT JOIN categories cat ON cat.id = v.category_id')
+  }
+  if (f.sort === 'likes') joins.push('LEFT JOIN likes l ON l.video_id = v.id')
+  return { from, joinSql: joins.length ? ' ' + joins.join(' ') : '' }
+}
+
+// Ids only, then hydrate with videosByIds. Avoids joining tags/likes onto
+// the whole catalog before LIMIT, which scanned ~395k rows per listing page
+// and ~6k+ rows for each watch-page "more from this channel" query.
+async function listVideoIds(
+  db: D1Database,
+  f: VideoFilter,
+  limit: number,
+  offset: number,
+): Promise<string[]> {
+  if (limit <= 0) return []
+  const tagId = f.tag ? await resolveTagId(db, f.tag) : null
+  if (f.tag && tagId == null) return []
+  const { clause, params } = videoWhere(f, { skipTag: tagId != null })
+  const { from, joinSql } = listFromAndJoins(f, tagId)
+  const whereParts: string[] = []
+  const bind: unknown[] = []
+  if (tagId != null) {
+    whereParts.push('vt.tag_id = ?')
+    bind.push(tagId)
+  }
+  if (clause) {
+    whereParts.push(clause.replace(/^WHERE\s+/, ''))
+    bind.push(...params)
+  }
+  const whereSql = whereParts.length ? 'WHERE ' + whereParts.join(' AND ') : ''
+  const order = videoOrder(f.sort)
+  const rows = await db
+    .prepare(`SELECT v.id FROM ${from}${joinSql} ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`)
+    .bind(...bind, limit, offset)
+    .all<{ id: string }>()
+  return (rows.results ?? []).map((r) => r.id)
+}
+
 async function countVideos(db: D1Database, f: VideoFilter): Promise<number> {
   // Unfiltered and channel-only totals are the precomputed channel counts.
   // The old COUNT joined videos × channels × categories (~3× a full scan).
@@ -844,14 +921,29 @@ async function countVideos(db: D1Database, f: VideoFilter): Promise<number> {
     const ch = drawer.channels.find((c) => c.id === f.channel)
     return ch?.video_count ?? ch?.n ?? 0
   }
-  const { clause, params } = videoWhere(f)
+  if (isTagOnlyQuery(f) && f.tag) {
+    const tagId = await resolveTagId(db, f.tag)
+    if (tagId == null) return 0
+    return countVideosForTag(db, tagId)
+  }
+  const tagId = f.tag ? await resolveTagId(db, f.tag) : null
+  if (f.tag && tagId == null) return 0
+  const { clause, params } = videoWhere(f, { skipTag: tagId != null })
+  const { from, joinSql } = listFromAndJoins({ ...f, sort: undefined }, tagId)
+  const whereParts: string[] = []
+  const bind: unknown[] = []
+  if (tagId != null) {
+    whereParts.push('vt.tag_id = ?')
+    bind.push(tagId)
+  }
+  if (clause) {
+    whereParts.push(clause.replace(/^WHERE\s+/, ''))
+    bind.push(...params)
+  }
+  const whereSql = whereParts.length ? 'WHERE ' + whereParts.join(' AND ') : ''
   const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS total FROM videos v
-       JOIN channels c ON c.id = v.channel_id
-       LEFT JOIN categories cat ON cat.id = v.category_id ${clause}`,
-    )
-    .bind(...params)
+    .prepare(`SELECT COUNT(*) AS total FROM ${from}${joinSql} ${whereSql}`)
+    .bind(...bind)
     .first<{ total: number }>()
   return row?.total ?? 0
 }
@@ -896,22 +988,70 @@ async function listVideos(
 ): Promise<{ videos: ApiVideo[]; nextPage: number | null; total: number }> {
   const withTotal = opts?.withTotal !== false
   if (f.sort === 'shuffle') return listShuffled(db, f, page, limit, withTotal)
-  const { clause, params } = videoWhere(f)
-  const order = videoOrder(f.sort)
   const offset = (page - 1) * limit
-  // Fetch one extra row to know whether another page exists.
-  const rows = await db
-    .prepare(`${VIDEO_SELECT} ${clause} GROUP BY v.id ORDER BY ${order} LIMIT ? OFFSET ?`)
-    .bind(...params, limit + 1, offset)
-    .all<VideoRow>()
-  const all = rows.results ?? []
-  const hasMore = all.length > limit
+  // Fetch one extra id to know whether another page exists, then hydrate.
+  const ids = await listVideoIds(db, f, limit + 1, offset)
+  const hasMore = ids.length > limit
+  const videos = await videosByIds(db, ids.slice(0, limit))
   const total = withTotal ? await countVideos(db, f) : 0
   return {
-    videos: all.slice(0, limit).map(toApiVideo),
+    videos,
     nextPage: hasMore ? page + 1 : null,
     total,
   }
+}
+
+// Top-viewed video ids for one channel, cached 6 hours in the isolate and
+// the Cache API (same layer as the drawer). Watch pages exclude the current
+// video in JS after this list is built, so the cache is shared per channel.
+const CHANNEL_TOP_TTL = DRAWER_TTL_SECONDS
+const channelTopMemo = new Map<number, { exp: number; ids: string[] }>()
+
+function channelTopCacheUrl(channelId: number): string {
+  return `https://tubeplus.net/__cache/channel-top-v1/${channelId}`
+}
+
+async function sameChannelTopIds(db: D1Database, channelId: number, limit: number): Promise<string[]> {
+  const now = Date.now()
+  const hit = channelTopMemo.get(channelId)
+  if (hit && hit.exp > now && hit.ids.length >= limit) return hit.ids.slice(0, limit)
+  try {
+    const cached = await caches.default.match(channelTopCacheUrl(channelId))
+    if (cached) {
+      const ids = (await cached.json()) as string[]
+      if (Array.isArray(ids) && ids.length) {
+        channelTopMemo.set(channelId, { exp: now + CHANNEL_TOP_TTL * 1000, ids })
+        return ids.slice(0, limit)
+      }
+    }
+  } catch {
+    // ignore
+  }
+  const rows = await db
+    .prepare('SELECT id FROM videos WHERE channel_id = ? ORDER BY views DESC LIMIT ?')
+    .bind(channelId, limit)
+    .all<{ id: string }>()
+  const ids = (rows.results ?? []).map((r) => r.id)
+  channelTopMemo.set(channelId, { exp: now + CHANNEL_TOP_TTL * 1000, ids })
+  try {
+    await caches.default.put(
+      channelTopCacheUrl(channelId),
+      new Response(JSON.stringify(ids), {
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': `public, max-age=${CHANNEL_TOP_TTL}`,
+        },
+      }),
+    )
+  } catch {
+    // ignore
+  }
+  return ids
+}
+
+async function sameChannelTopVideos(db: D1Database, channelId: number, limit: number): Promise<ApiVideo[]> {
+  const ids = await sameChannelTopIds(db, channelId, limit)
+  return videosByIds(db, ids)
 }
 
 function parsePageLimit(url: URL): { page: number; limit: number } {
@@ -1704,13 +1844,13 @@ app.get('/watch/:id/:slug?', async (c) => {
     return c.redirect(watchURL(v), 301)
   }
   const channelCount = v.channel.n ?? 0
-  const [sameChannel, shuffled] = await Promise.all([
-    listVideos(db, { channel: v.channel.id, sort: 'views' }, 1, 8, { withTotal: false }),
+  const [sameChannelVideos, shuffled] = await Promise.all([
+    sameChannelTopVideos(db, v.channel.id, 8),
     listVideos(db, { sort: 'shuffle' }, 1, 12, { withTotal: false }),
   ])
   const seen = new Set<string>([v.id])
   const upNext: ApiVideo[] = []
-  for (const x of [...sameChannel.videos, ...shuffled.videos]) {
+  for (const x of [...sameChannelVideos, ...shuffled.videos]) {
     if (!seen.has(x.id)) {
       seen.add(x.id)
       upNext.push(x)
